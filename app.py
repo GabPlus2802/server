@@ -1,19 +1,41 @@
 import os
+import socket
 from flask import Flask, request, jsonify
 import psycopg2
 
 app = Flask(__name__)
 PORT = int(os.getenv("PORT", "5000"))
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+# ====== Postgres (Supabase Transaction Pooler - IPv4) ======
+PGHOST = os.getenv("PGHOST", "").strip()
+PGPORT = int(os.getenv("PGPORT", "6543"))
+PGDATABASE = os.getenv("PGDATABASE", "postgres").strip()
+PGUSER = os.getenv("PGUSER", "").strip()
+PGPASSWORD = os.getenv("PGPASSWORD", "").strip()
+PGSSLMODE = os.getenv("PGSSLMODE", "require").strip()
+
 DEFAULT_COMMAND = os.getenv("DEFAULT_COMMAND", "CLOSE").strip().upper()
 
-if not DATABASE_URL:
-    raise RuntimeError("Falta DATABASE_URL (connection string de Supabase Postgres). Incluye sslmode=require.")
+if not (PGHOST and PGUSER and PGPASSWORD):
+    raise RuntimeError("Faltan variables: PGHOST, PGUSER, PGPASSWORD (y opcional PGPORT/PGDATABASE/PGSSLMODE).")
+
+def resolve_ipv4(host: str) -> str:
+    # Fuerza resolución IPv4 (AF_INET)
+    infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+    return infos[0][4][0]
 
 def db():
-    # IMPORTANTE: en Supabase normalmente se requiere SSL.
-    # Pon en DATABASE_URL: ...?sslmode=require
-    return psycopg2.connect(DATABASE_URL)
+    ip4 = resolve_ipv4(PGHOST)
+    return psycopg2.connect(
+        host=PGHOST,       # nombre (opcional pero útil)
+        hostaddr=ip4,      # IPv4 forzado
+        port=PGPORT,
+        dbname=PGDATABASE,
+        user=PGUSER,
+        password=PGPASSWORD,
+        sslmode=PGSSLMODE,
+        connect_timeout=5,
+    )
 
 def get_latest_command():
     with db() as conn, conn.cursor() as cur:
@@ -28,17 +50,14 @@ def get_latest_command():
 
 def insert_command(cmd: str):
     with db() as conn, conn.cursor() as cur:
-        cur.execute("""
-            insert into public.door_command_log (command)
-            values (%s)
-        """, (cmd,))
+        cur.execute("insert into public.door_command_log (command) values (%s)", (cmd,))
 
 def insert_status(state: str, ts_ms):
     with db() as conn, conn.cursor() as cur:
-        cur.execute("""
-            insert into public.door_status_log (state, ts_ms)
-            values (%s, %s)
-        """, (state, ts_ms))
+        cur.execute(
+            "insert into public.door_status_log (state, ts_ms) values (%s, %s)",
+            (state, ts_ms),
+        )
 
 def get_last_status():
     with db() as conn, conn.cursor() as cur:
@@ -53,6 +72,7 @@ def get_last_status():
             return None
         return {"state": row[0], "ts_ms": row[1], "created_at": row[2].isoformat()}
 
+# ====== ROUTES ======
 @app.get("/")
 def root():
     return "server activo", 200, {"Content-Type": "text/plain; charset=utf-8"}
